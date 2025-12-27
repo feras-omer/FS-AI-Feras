@@ -1,0 +1,15 @@
+# ROS 2 / colcon
+build/
+install/
+log/
+
+# VSCode / JetBrains
+.vscode/
+.idea/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store

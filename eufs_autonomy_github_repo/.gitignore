@@ -1,0 +1,13 @@
+# colcon / ament
+build/
+install/
+log/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS / editor
+*~
+*.swp
+.DS_Store
