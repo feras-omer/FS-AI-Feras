@@ -18,7 +18,7 @@ Inside your ROS 2 workspace:
 
 ```bash
 cd ~/your_ws/src
-git clone <YOUR_GITHUB_REPO_URL> eufs_autonomy
+git clone https://github.com/feras-omer/FS-AI-Feras eufs_autonomy
 cd ..
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --packages-select eufs_autonomy
