@@ -3,6 +3,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <vision_msgs/msg/detection2_d_array.hpp>
 
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
@@ -11,7 +12,17 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
+#include <message_filters/subscriber.h>
+#include <message_filters/synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
+
 enum ConeColor { UNKNOWN = 0, BLUE = 1, YELLOW = 2 };
+
+struct YoloDet
+{
+  cv::Rect box;
+  int cls;
+};
 
 class CameraConeVerifier : public rclcpp::Node
 {
@@ -23,9 +34,13 @@ public:
   {
     auto qos = rclcpp::SensorDataQoS();
 
-    cones_sub_ = create_subscription<geometry_msgs::msg::PoseArray>(
-      "/lidar/cones", qos,
-      std::bind(&CameraConeVerifier::conesCb, this, std::placeholders::_1));
+    cones_sub_.subscribe(this, "/lidar/cones", qos.get_rmw_qos_profile());
+    yolo_sub_.subscribe(this, "/zed/cones_detections", qos.get_rmw_qos_profile());
+
+    sync_ = std::make_shared<Sync>(Sync(10), cones_sub_, yolo_sub_);
+    sync_->registerCallback(
+      std::bind(&CameraConeVerifier::syncedCb, this, std::placeholders::_1, std::placeholders::_2)
+    );
 
     image_sub_ = create_subscription<sensor_msgs::msg::Image>(
       "/zed/image_raw", qos,
@@ -35,29 +50,30 @@ public:
       "/zed/camera_info", qos,
       std::bind(&CameraConeVerifier::camInfoCb, this, std::placeholders::_1));
 
-    rclcpp::QoS reliable(rclcpp::KeepLast(10));
+    rclcpp::QoS reliable(10);
     reliable.reliable();
 
-    verified_pub_ = create_publisher<geometry_msgs::msg::PoseArray>(
-      "/cones/verified", reliable);
+    verified_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/cones/verified", reliable);
+    debug_pub_ = create_publisher<sensor_msgs::msg::Image>("/debug/projection", reliable);
 
-    blue_mask_pub_   = create_publisher<sensor_msgs::msg::Image>("/debug/blue_mask", reliable);
-    yellow_mask_pub_ = create_publisher<sensor_msgs::msg::Image>("/debug/yellow_mask", reliable);
-    debug_img_pub_   = create_publisher<sensor_msgs::msg::Image>("/debug/projection", reliable);
-
-    RCLCPP_INFO(get_logger(), "Camera cone verifier started");
+    RCLCPP_INFO(get_logger(), "Camera cone verifier started and synced with YOLO detections");
   }
 
 private:
-  
-  // Image & Camera Info
-  
+  using SyncPolicy =
+    message_filters::sync_policies::ApproximateTime<
+      geometry_msgs::msg::PoseArray,
+      vision_msgs::msg::Detection2DArray>;
+  using Sync = message_filters::Synchronizer<SyncPolicy>;
 
   void imageCb(const sensor_msgs::msg::Image::SharedPtr msg)
   {
-    try {
+    try
+    {
       last_image_ = cv_bridge::toCvCopy(msg, "bgr8")->image;
-    } catch (...) {
+    }
+    catch (...)
+    {
       last_image_.release();
     }
   }
@@ -71,68 +87,60 @@ private:
     cam_ready_ = true;
   }
 
-  
-  // Main Callback
-  
-
-  void conesCb(const geometry_msgs::msg::PoseArray::SharedPtr msg)
+  void syncedCb(
+    const std::shared_ptr<const geometry_msgs::msg::PoseArray>& cones,
+    const std::shared_ptr<const vision_msgs::msg::Detection2DArray>& yolo)
   {
     if (!cam_ready_ || last_image_.empty())
       return;
 
-    cv::Mat hsv;
-    cv::cvtColor(last_image_, hsv, cv::COLOR_BGR2HSV);
+    std::vector<YoloDet> dets;
+    dets.reserve(yolo->detections.size());
 
-    cv::Mat blue_mask, yellow_mask;
-    cv::inRange(
-      hsv,
-      cv::Scalar(90, 80, 50),
-      cv::Scalar(130, 255, 255),
-      blue_mask
-    );
+    for (const auto &d : yolo->detections)
+    {
+      if (d.results.empty())
+        continue;
 
-    cv::inRange(
-      hsv,
-      cv::Scalar(20, 80, 50),
-      cv::Scalar(40, 255, 255),
-      yellow_mask
-    );
+      int cls = std::stoi(d.results[0].hypothesis.class_id);
 
-    publishMask(blue_mask, blue_mask_pub_);
-    publishMask(yellow_mask, yellow_mask_pub_);
+      const auto &b = d.bbox;
+      int x = static_cast<int>(b.center.x - b.size_x * 0.5);
+      int y = static_cast<int>(b.center.y - b.size_y * 0.5);
+      int w = static_cast<int>(b.size_x);
+      int h = static_cast<int>(b.size_y);
+
+      dets.push_back({cv::Rect(x, y, w, h), cls});
+    }
 
     geometry_msgs::msg::PoseArray out;
-    out.header = msg->header;
+    out.header = cones->header;
 
     cv::Mat debug = last_image_.clone();
-    bool any_verified = false;
+    bool any = false;
+    const int BOX = 15;
 
-    const int BOX_SIZE = 15; // box half-width for debug
-
-    for (const auto &p : msg->poses)
+    for (const auto &p : cones->poses)
     {
       geometry_msgs::msg::PoseStamped in, cam;
-      in.header = msg->header;
+      in.header = cones->header;
       in.pose = p;
 
-      try {
+      try
+      {
         cam = tf_buffer_.transform(
-          in, "zed_left_camera_optical_frame",
+          in,
+          "zed_left_camera_optical_frame",
           tf2::durationFromSec(0.05));
-      } catch (...) {
+      }
+      catch (...)
+      {
         continue;
       }
 
-      
-      // Axis remap (robot→optical)
-      
-      double Xr = cam.pose.position.x;
-      double Yr = cam.pose.position.y;
-      double Zr = cam.pose.position.z;
-
-      double X = -Yr;   // right
-      double Y = -Zr;   // down
-      double Z =  Xr;   // forward (depth)
+      double X = -cam.pose.position.y;
+      double Y = -cam.pose.position.z;
+      double Z =  cam.pose.position.x;
 
       if (Z <= 0.5)
         continue;
@@ -140,93 +148,66 @@ private:
       int u = static_cast<int>(fx_ * X / Z + cx_);
       int v = static_cast<int>(fy_ * Y / Z + cy_);
 
-      if (u < 0 || v < 0 ||
-          u >= debug.cols || v >= debug.rows)
+      if (u < 0 || v < 0 || u >= debug.cols || v >= debug.rows)
         continue;
 
       int color = UNKNOWN;
-      if (hitMask(blue_mask, u, v, 5))   color = BLUE;
-      if (hitMask(yellow_mask, u, v, 5)) color = YELLOW;
 
-      
-      // Draw visible colored boxes
-      
-      cv::Scalar box_color;
-      if (color == BLUE)      box_color = cv::Scalar(255, 0, 0);   // Blue box
-      else if (color == YELLOW) box_color = cv::Scalar(0, 255, 255); // Yellow box
-      else                    box_color = cv::Scalar(0, 0, 255);   // Red for unknown
+      for (const auto &d : dets)
+      {
+        if (d.box.contains(cv::Point(u, v)))
+        {
+          if (d.cls == 2)
+            color = BLUE;
+          else if (d.cls == 0)
+            color = YELLOW;
+          else
+            color = UNKNOWN;
+          break;
+        }
+      }
 
-      // top-left and bottom-right
-      cv::Point tl(u - BOX_SIZE, v - BOX_SIZE);
-      cv::Point br(u + BOX_SIZE, v + BOX_SIZE);
+      cv::Scalar c;
+      if (color == BLUE)
+        c = cv::Scalar(255, 0, 0);
+      else if (color == YELLOW)
+        c = cv::Scalar(0, 255, 255);
+      else
+        c = cv::Scalar(0, 0, 255);
 
-      cv::rectangle(debug, tl, br, box_color, 2);
+      cv::rectangle(
+        debug,
+        cv::Point(u - BOX, v - BOX),
+        cv::Point(u + BOX, v + BOX),
+        c,
+        2);
 
       if (color != UNKNOWN)
       {
-        geometry_msgs::msg::Pose pose = p;
-        pose.orientation.z = color;
+        auto pose = p;
+        pose.orientation.z = static_cast<double>(color);
         pose.orientation.w = 1.0;
         out.poses.push_back(pose);
-        any_verified = true;
+        any = true;
       }
     }
 
-    publishDebug(debug);
+    debug_pub_->publish(*cv_bridge::CvImage({}, "bgr8", debug).toImageMsg());
 
-    if (!any_verified)
-    {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000,
-        "No verified cones found — passing LiDAR cones through");
-      out = *msg;
-    }
+    if (!any)
+      out = *cones;
 
     verified_pub_->publish(out);
   }
 
-  
-  // Helpers
-  
+  message_filters::Subscriber<geometry_msgs::msg::PoseArray> cones_sub_;
+  message_filters::Subscriber<vision_msgs::msg::Detection2DArray> yolo_sub_;
+  std::shared_ptr<Sync> sync_;
 
-  bool hitMask(const cv::Mat &mask, int u, int v, int r)
-  {
-    for (int du = -r; du <= r; ++du)
-      for (int dv = -r; dv <= r; ++dv)
-      {
-        int xx = u + du;
-        int yy = v + dv;
-        if (xx < 0 || yy < 0 || xx >= mask.cols || yy >= mask.rows)
-          continue;
-        if (mask.at<uint8_t>(yy, xx) > 0)
-          return true;
-      }
-    return false;
-  }
-
-  void publishMask(const cv::Mat &m,
-                   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr p)
-  {
-    p->publish(*cv_bridge::CvImage({}, "mono8", m).toImageMsg());
-  }
-
-  void publishDebug(const cv::Mat &img)
-  {
-    debug_img_pub_->publish(*cv_bridge::CvImage({}, "bgr8", img).toImageMsg());
-  }
-
-  
-  // ROS
-  
-
-  rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr cones_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_sub_;
-
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr verified_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr blue_mask_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr yellow_mask_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr debug_img_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr debug_pub_;
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
@@ -243,4 +224,3 @@ int main(int argc, char **argv)
   rclcpp::shutdown();
   return 0;
 }
-
