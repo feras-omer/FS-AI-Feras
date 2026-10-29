@@ -26,6 +26,8 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(ackermann_msgs REQUIRED)
+find_package(vision_msgs REQUIRED)
+find_package(message_filters REQUIRED)
 
 # Optional EUFS interfaces (uncomment if you actually use eufs_msgs in code)
 # find_package(eufs_msgs REQUIRED)
@@ -81,7 +83,7 @@ add_executable(camera_cone_verifier
   src/perception/camera_cone_verifier.cpp
 )
 ament_target_dependencies(camera_cone_verifier
-  rclcpp sensor_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs cv_bridge
+  rclcpp sensor_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs cv_bridge vision_msgs message_filters
 )
 target_link_libraries(camera_cone_verifier ${OpenCV_LIBRARIES})
 install(TARGETS camera_cone_verifier DESTINATION lib/${PROJECT_NAME})

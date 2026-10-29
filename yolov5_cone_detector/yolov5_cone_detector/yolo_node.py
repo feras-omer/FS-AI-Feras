@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import os
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -8,20 +10,24 @@ from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2DArray, Detection2D, ObjectHypothesisWithPose
 
 from cv_bridge import CvBridge
+from ament_index_python.packages import get_package_share_directory
 import torch
-import cv2
 
 
 class YOLOv5ConeNode(Node):
     def __init__(self):
         super().__init__('yolov5_cone_node')
 
-        self.get_logger().info("Loading YOLOv5 model...")
+        default_model = os.path.join(
+            get_package_share_directory('yolov5_cone_detector'), 'best.pt')
+        model_path = self.declare_parameter('model_path', default_model).value
+
+        self.get_logger().info(f"Loading YOLOv5 model from {model_path}...")
 
         self.model = torch.hub.load(
             'ultralytics/yolov5',
             'custom',
-            path='.../FS-AI-Feras/best.pt'
+            path=model_path
         )
 
         self.model.conf = 0.5
@@ -91,4 +97,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

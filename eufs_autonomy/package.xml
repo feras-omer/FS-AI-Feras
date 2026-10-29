@@ -21,6 +21,8 @@
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
   <depend>ackermann_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>message_filters</depend>
 
   <!-- Perception -->
   <depend>pcl_conversions</depend>
@@ -33,6 +35,9 @@
 
   <!-- Optional: only keep if you actually use eufs_msgs in code -->
   <!-- <depend>eufs_msgs</depend> -->
+
+  <!-- Launched by pipeline.launch.py -->
+  <exec_depend>yolov5_cone_detector</exec_depend>
 
   <!-- Testing -->
   <test_depend>ament_lint_auto</test_depend>
