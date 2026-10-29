@@ -38,6 +38,7 @@
 
   <!-- Launched by pipeline.launch.py -->
   <exec_depend>yolov5_cone_detector</exec_depend>
+  <exec_depend>rviz2</exec_depend>
 
   <!-- Testing -->
   <test_depend>ament_lint_auto</test_depend>

@@ -1,17 +1,31 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <tf2/utils.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <Eigen/Dense>
 #include <vector>
-#include <algorithm>
 
+#include "eufs_autonomy/track_geometry.hpp"
+
+// Local centerline used while exploring (lap 1): midpoints of blue/yellow
+// cone pairs, ordered forward from the car.
 class CenterlineGenerator : public rclcpp::Node
 {
 public:
-  CenterlineGenerator() : Node("centerline_generator")
+  CenterlineGenerator()
+  : Node("centerline_generator"),
+    tf_buffer_(this->get_clock()),
+    tf_listener_(tf_buffer_)
   {
+    max_width_ = declare_parameter("max_track_width", 7.0);
+    max_step_ = declare_parameter("max_step", 6.0);
+    max_first_step_ = declare_parameter("max_first_step", 12.0);
+    max_turn_ = declare_parameter("max_turn_deg", 70.0) * M_PI / 180.0;
+    max_length_ = declare_parameter("max_length", 30.0);
+
     rclcpp::QoS qos(rclcpp::KeepLast(10));
     qos.reliable();
-
 
     cone_sub_ = create_subscription<geometry_msgs::msg::PoseArray>(
       "/map/cones", qos,
@@ -24,37 +38,48 @@ public:
 private:
   void conesCb(const geometry_msgs::msg::PoseArray::SharedPtr msg)
   {
-    std::vector<Eigen::Vector2d> left, right;
+    track_geometry::Points left, right;
 
     for (const auto &p : msg->poses)
     {
-      if (static_cast<int>(p.orientation.z) == 2)
+      if (static_cast<int>(p.orientation.z) == 1)       // blue = left
         left.emplace_back(p.position.x, p.position.y);
-      else if (static_cast<int>(p.orientation.z) == 1)
+      else if (static_cast<int>(p.orientation.z) == 2)  // yellow = right
         right.emplace_back(p.position.x, p.position.y);
     }
-    
-    RCLCPP_INFO(this->get_logger(),
-  "Centerline: left=%zu right=%zu", left.size(), right.size());
-  
-    if (left.size() < 2 || right.size() < 2)
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+      "Centerline: left=%zu right=%zu", left.size(), right.size());
+
+    if (left.empty() || right.empty())
       return;
 
-    auto sort_fwd = [](auto &a, auto &b){ return a.x() < b.x(); };
-    std::sort(left.begin(), left.end(), sort_fwd);
-    std::sort(right.begin(), right.end(), sort_fwd);
+    geometry_msgs::msg::TransformStamped car;
+    try {
+      car = tf_buffer_.lookupTransform(
+        msg->header.frame_id, "base_footprint", tf2::TimePointZero);
+    } catch (...) {
+      return;
+    }
+
+    Eigen::Vector2d start(car.transform.translation.x, car.transform.translation.y);
+    double yaw = tf2::getYaw(car.transform.rotation);
+
+    auto mids = track_geometry::pairMidpoints(left, right, max_width_);
+    auto path = track_geometry::orderPath(
+      mids, start, yaw, max_step_, max_turn_, max_first_step_, max_length_);
+
+    if (path.empty())
+      return;
 
     geometry_msgs::msg::PoseArray centerline;
     centerline.header = msg->header;
 
-    size_t N = std::min(left.size(), right.size());
-    for (size_t i = 0; i < N; ++i)
+    for (const auto &m : path)
     {
-      Eigen::Vector2d mid = 0.5 * (left[i] + right[i]);
-
       geometry_msgs::msg::Pose p;
-      p.position.x = mid.x();
-      p.position.y = mid.y();
+      p.position.x = m.x();
+      p.position.y = m.y();
       p.position.z = 0.0;
       p.orientation.w = 1.0;
       centerline.poses.push_back(p);
@@ -65,6 +90,11 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr cone_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr centerline_pub_;
+
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
+
+  double max_width_, max_step_, max_first_step_, max_turn_, max_length_;
 };
 
 int main(int argc, char **argv)

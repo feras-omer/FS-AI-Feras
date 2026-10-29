@@ -1,0 +1,91 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 100
+      Color: 160; 160; 164
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: false
+      Marker Scale: 2
+      Frames:
+        All Enabled: false
+        base_footprint:
+          Value: true
+        map:
+          Value: true
+    - Class: rviz_default_plugins/Path
+      Name: Global path (lap 2+)
+      Enabled: true
+      Color: 0; 200; 0
+      Line Style: Billboards
+      Line Width: 0.15
+      Topic:
+        Value: /global_path
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/PoseArray
+      Name: Local centerline (lap 1)
+      Enabled: true
+      Color: 255; 0; 255
+      Shape: Arrow (Flat)
+      Arrow Length: 0.5
+      Topic:
+        Value: /map/centerline
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/PoseArray
+      Name: Cone map
+      Enabled: true
+      Color: 255; 170; 0
+      Shape: Axes
+      Axes Length: 0.4
+      Axes Radius: 0.08
+      Topic:
+        Value: /map/cones
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Image
+      Name: Camera projection
+      Enabled: true
+      Topic:
+        Value: /debug/projection
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Interact
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 12
+      X: 0
+      Y: 0
+      Angle: 0
+      Target Frame: base_footprint
+Window Geometry:
+  Height: 900
+  Width: 1400

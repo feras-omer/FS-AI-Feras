@@ -4,6 +4,7 @@
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -13,7 +14,16 @@ struct MapCone
   double y;
   int observations;
   int missed;
-  int color; // 1=blue, 2=yellow
+  int blue_votes;
+  int yellow_votes;
+
+  // 0=unknown, 1=blue, 2=yellow (majority vote over observations)
+  int color() const
+  {
+    if (blue_votes > yellow_votes) return 1;
+    if (yellow_votes > blue_votes) return 2;
+    return 0;
+  }
 };
 
 class ConeMapper : public rclcpp::Node
@@ -41,9 +51,12 @@ map_pub_ = create_publisher<geometry_msgs::msg::PoseArray>(
   }
 
 private:
-  static constexpr double ASSOC_RADIUS = 0.75;
-  static constexpr int MIN_OBSERVATIONS = 1;
-  static constexpr int MAX_MISSES = 5;
+  static constexpr double ASSOC_RADIUS = 1.0;
+  // Cones seen this many times are confirmed and kept for the whole run,
+  // so the map persists after they leave the sensor range (needed for the
+  // global path after lap 1). Unconfirmed cones are dropped as noise.
+  static constexpr int MIN_OBSERVATIONS = 3;
+  static constexpr int MAX_MISSES = 10;
 
   void coneCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
   {
@@ -70,10 +83,12 @@ private:
       );
     }
 
-    // Remove stale cones
+    // Remove unconfirmed cones that were not seen again (noise)
     map_cones_.erase(
       std::remove_if(map_cones_.begin(), map_cones_.end(),
-        [](const MapCone &c){ return c.missed > MAX_MISSES; }),
+        [](const MapCone &c){
+          return c.observations < MIN_OBSERVATIONS && c.missed > MAX_MISSES;
+        }),
       map_cones_.end()
     );
 
@@ -82,24 +97,36 @@ private:
 
   void associateCone(double x, double y, int color)
   {
+    // Associate with the nearest cone regardless of colour; colour is voted
+    MapCone *best = nullptr;
+    double best_d = ASSOC_RADIUS;
     for (auto &c : map_cones_)
     {
-      if (std::hypot(c.x - x, c.y - y) < ASSOC_RADIUS &&
-          c.color == color)
+      double d = std::hypot(c.x - x, c.y - y);
+      if (d < best_d)
       {
-        c.x = (c.x * c.observations + x) / (c.observations + 1);
-        c.y = (c.y * c.observations + y) / (c.observations + 1);
-        c.observations++;
-        c.missed = 0;
-        return;
+        best_d = d;
+        best = &c;
       }
     }
 
-    map_cones_.push_back({x, y, 1, 0, color});
-    
+    if (!best)
+    {
+      map_cones_.push_back({x, y, 0, 0, 0, 0});
+      best = &map_cones_.back();
+    }
+
+    best->x = (best->x * best->observations + x) / (best->observations + 1);
+    best->y = (best->y * best->observations + y) / (best->observations + 1);
+    best->observations++;
+    best->missed = 0;
+    if (color == 1)
+      best->blue_votes++;
+    else if (color == 2)
+      best->yellow_votes++;
+
     RCLCPP_DEBUG(this->get_logger(), "Assoc cone (color=%d) at (%.2f,%.2f)",
     color, x, y);
-
   }
 
   void publishMap(const rclcpp::Time &stamp)
@@ -117,7 +144,7 @@ private:
       p.position.x = c.x;
       p.position.y = c.y;
       p.position.z = 0.0;
-      p.orientation.z = c.color;
+      p.orientation.z = c.color();
       p.orientation.w = 1.0;
 
       out.poses.push_back(p);

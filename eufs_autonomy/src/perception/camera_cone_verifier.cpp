@@ -157,9 +157,10 @@ private:
       {
         if (d.box.contains(cv::Point(u, v)))
         {
-          if (d.cls == 2)
+          // best.pt classes: 0 blue, 1 large orange, 2 orange, 3 unknown, 4 yellow
+          if (d.cls == 0)
             color = BLUE;
-          else if (d.cls == 0)
+          else if (d.cls == 4)
             color = YELLOW;
           else
             color = UNKNOWN;

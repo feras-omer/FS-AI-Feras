@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import warnings
 
 import rclpy
 from rclpy.node import Node
@@ -12,6 +13,10 @@ from vision_msgs.msg import Detection2DArray, Detection2D, ObjectHypothesisWithP
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
 import torch
+
+# YOLOv5's hub code calls the deprecated torch.cuda.amp.autocast on every
+# frame, which floods the launch output
+warnings.filterwarnings('ignore', category=FutureWarning, message='.*autocast.*')
 
 
 class YOLOv5ConeNode(Node):
@@ -62,7 +67,8 @@ class YOLOv5ConeNode(Node):
 
     def image_callback(self, msg: Image):
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+            # YOLOv5 AutoShape expects RGB for numpy input
+            cv_image = self.bridge.imgmsg_to_cv2(msg, 'rgb8')
         except Exception:
             return
 
@@ -91,8 +97,13 @@ class YOLOv5ConeNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    rclpy.spin(YOLOv5ConeNode())
-    rclpy.shutdown()
+    try:
+        rclpy.spin(YOLOv5ConeNode())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

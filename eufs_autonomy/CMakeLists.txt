@@ -102,9 +102,18 @@ add_executable(centerline_generator
   src/planning/centerline_generator.cpp
 )
 ament_target_dependencies(centerline_generator
-  rclcpp geometry_msgs
+  rclcpp geometry_msgs tf2 tf2_ros
 )
 install(TARGETS centerline_generator DESTINATION lib/${PROJECT_NAME})
+
+# Global path planner (closed Bezier loop after lap 1)
+add_executable(global_path_planner
+  src/planning/global_path_planner.cpp
+)
+ament_target_dependencies(global_path_planner
+  rclcpp geometry_msgs nav_msgs tf2 tf2_ros
+)
+install(TARGETS global_path_planner DESTINATION lib/${PROJECT_NAME})
 
 # Pure pursuit controller
 add_executable(pure_pursuit_controller
