@@ -70,12 +70,14 @@ inline Points pairMidpoints(
 
 // Greedy walk from `start` along `heading`: repeatedly step to the nearest
 // unused point that is within max_step and no more than max_turn (rad) off
-// the current direction. The first step may be up to max_first_step, since
-// cones right beside the car are outside the camera view and never coloured.
-// Stops when no point qualifies or the walked length exceeds max_length.
+// the current direction. If none qualifies, retry with max_gap: this bridges
+// stretches with no blue/yellow pair, such as the orange start line, and the
+// first step from the car (cones beside it are outside the camera view and
+// never coloured). Stops when nothing qualifies or the walked length exceeds
+// max_length.
 inline Points orderPath(
   const Points &points, const Eigen::Vector2d &start, double heading,
-  double max_step, double max_turn, double max_first_step,
+  double max_step, double max_turn, double max_gap,
   double max_length = 1e9)
 {
   Points path;
@@ -85,7 +87,7 @@ inline Points orderPath(
   Eigen::Vector2d dir(std::cos(heading), std::sin(heading));
   double length = 0.0;
 
-  while (length < max_length)
+  auto best_within = [&](double limit)
   {
     int best = -1;
     double best_cost = 1e9;
@@ -95,7 +97,7 @@ inline Points orderPath(
         continue;
       Eigen::Vector2d d = points[i] - cur;
       double dist = d.norm();
-      if (dist < 1e-3 || dist > (path.empty() ? max_first_step : max_step))
+      if (dist < 1e-3 || dist > limit)
         continue;
       double turn = std::acos(std::clamp(d.dot(dir) / dist, -1.0, 1.0));
       if (turn > max_turn)
@@ -108,6 +110,14 @@ inline Points orderPath(
         best = static_cast<int>(i);
       }
     }
+    return best;
+  };
+
+  while (length < max_length)
+  {
+    int best = best_within(max_step);
+    if (best < 0)
+      best = best_within(max_gap);
     if (best < 0)
       break;
 
@@ -119,6 +129,64 @@ inline Points orderPath(
     path.push_back(cur);
   }
   return path;
+}
+
+// Orders points by where they lie along a driven trajectory (e.g. the car's
+// lap-1 route): each point is keyed by the arc length of its nearest
+// trajectory sample. Points further than max_dist from the trajectory are
+// dropped as noise. Unlike orderPath this cannot skip a section of track or
+// dead-end where cones are missing.
+inline Points orderAlongTrajectory(
+  const Points &points, const Points &trajectory, double max_dist)
+{
+  if (trajectory.empty())
+    return {};
+
+  std::vector<double> s(trajectory.size(), 0.0);
+  for (size_t i = 1; i < trajectory.size(); ++i)
+    s[i] = s[i - 1] + (trajectory[i] - trajectory[i - 1]).norm();
+
+  // Direction of travel at the start, measured over the first ~2 m
+  size_t k = 0;
+  while (k + 1 < trajectory.size() && s[k] < 2.0)
+    ++k;
+  Eigen::Vector2d start_dir = trajectory[k] - trajectory[0];
+  if (start_dir.norm() > 1e-6)
+    start_dir.normalize();
+
+  std::vector<std::pair<double, Eigen::Vector2d>> keyed;
+  for (const auto &p : points)
+  {
+    size_t best = 0;
+    double best_d = 1e18;
+    for (size_t i = 0; i < trajectory.size(); ++i)
+    {
+      double d = (trajectory[i] - p).squaredNorm();
+      if (d < best_d)
+      {
+        best_d = d;
+        best = i;
+      }
+    }
+    if (std::sqrt(best_d) > max_dist)
+      continue;
+
+    // A lap ends a few metres before the start, so points just behind the
+    // start line belong at the end of the loop, not the beginning
+    double along = (p - trajectory[0]).dot(start_dir);
+    if (s[best] < 3.0 && along < 0.0)
+      keyed.emplace_back(s.back() + 10.0 + along, p);
+    else
+      keyed.emplace_back(s[best], p);
+  }
+
+  std::sort(keyed.begin(), keyed.end(),
+    [](const auto &a, const auto &b) { return a.first < b.first; });
+
+  Points out;
+  for (const auto &k : keyed)
+    out.push_back(k.second);
+  return out;
 }
 
 }  // namespace track_geometry

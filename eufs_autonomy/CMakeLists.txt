@@ -29,8 +29,8 @@ find_package(ackermann_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(message_filters REQUIRED)
 
-# Optional EUFS interfaces (uncomment if you actually use eufs_msgs in code)
-# find_package(eufs_msgs REQUIRED)
+# EUFS interfaces (WaypointArrayStamped for the simulator's RViz)
+find_package(eufs_msgs REQUIRED)
 
 
 # Dependencies (3rd party)
@@ -111,7 +111,7 @@ add_executable(global_path_planner
   src/planning/global_path_planner.cpp
 )
 ament_target_dependencies(global_path_planner
-  rclcpp geometry_msgs nav_msgs tf2 tf2_ros
+  rclcpp geometry_msgs nav_msgs tf2 tf2_ros eufs_msgs
 )
 install(TARGETS global_path_planner DESTINATION lib/${PROJECT_NAME})
 

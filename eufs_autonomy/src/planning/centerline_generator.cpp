@@ -20,7 +20,7 @@ public:
   {
     max_width_ = declare_parameter("max_track_width", 7.0);
     max_step_ = declare_parameter("max_step", 6.0);
-    max_first_step_ = declare_parameter("max_first_step", 12.0);
+    max_gap_ = declare_parameter("max_gap", 12.0);
     max_turn_ = declare_parameter("max_turn_deg", 70.0) * M_PI / 180.0;
     max_length_ = declare_parameter("max_length", 30.0);
 
@@ -67,7 +67,7 @@ private:
 
     auto mids = track_geometry::pairMidpoints(left, right, max_width_);
     auto path = track_geometry::orderPath(
-      mids, start, yaw, max_step_, max_turn_, max_first_step_, max_length_);
+      mids, start, yaw, max_step_, max_turn_, max_gap_, max_length_);
 
     if (path.empty())
       return;
@@ -94,7 +94,7 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 
-  double max_width_, max_step_, max_first_step_, max_turn_, max_length_;
+  double max_width_, max_step_, max_gap_, max_turn_, max_length_;
 };
 
 int main(int argc, char **argv)

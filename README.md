@@ -17,6 +17,7 @@ EUFS sim (Gazebo)
  ├─ TF map→base_footprint ─► cone_mapper ─────► /map/cones              persistent cone map (map frame)
  │                           centerline_generator ─► /map/centerline    local path ahead of the car (lap 1)
  │                           global_path_planner ──► /global_path       closed Bezier loop (after lap 1)
+ │                                               └─► /trajectory        same loop for the sim's RViz (grows during lap 1)
  └─ /cmd ◄─ pure_pursuit_controller                                     steering + speed, 20 Hz
 ```
 
@@ -24,7 +25,7 @@ Cone colour is carried in `pose.orientation.z` (`1` = blue = left, `2` = yellow 
 
 **Lap 1 (explore):** the car follows a local centerline (blue/yellow midpoints ordered forward from the car) at up to `explore_speed`, while the mapper builds a persistent cone map. Cones seen 3+ times are kept for the whole run; colour is a majority vote.
 
-**End of lap 1:** when the car is back within 4 m of its start after driving 40+ m, `global_path_planner` pairs every blue/yellow cone in the map, orders the midpoints around the loop, smooths them, and fits piecewise cubic Bezier curves (Catmull-Rom control points, so segments join smoothly). The result is published once on `/global_path` (`nav_msgs/Path`, transient local, so it stays available to RViz and late subscribers).
+**End of lap 1:** when the car is back within 4 m of its start after driving 40+ m, `global_path_planner` pairs every blue/yellow cone in the map and orders the midpoints by where they lie along the route the car actually drove that lap (so the loop can't skip a section or dead-end where cones are missing). It then smooths them and fits piecewise cubic Bezier curves (Catmull-Rom control points, so segments join smoothly). The result is published on `/global_path` (`nav_msgs/Path`, transient local, republished every second) and, for the simulator's RViz, on `/trajectory`. During lap 1, `/trajectory` shows the path forming along the route driven so far.
 
 **Lap 2+ (race):** the controller follows the closed global path with a speed profile: `v = sqrt(max_lat_acc / curvature)`, limited by braking before corners and by acceleration after them. The planner logs every lap time.
 
@@ -100,7 +101,9 @@ ros2 launch eufs_launcher simulation.launch.py track:=small_track commandMode:=v
 ros2 launch eufs_autonomy pipeline.launch.py rviz:=true
 # other weights: ... model_path:=/path/to/weights.pt
 ```
-Wait for `YOLOv5 node ready`. `rviz:=true` opens a top-down RViz view with the global path (green), the lap-1 centerline (magenta), the cone map and the camera projection. To use the simulator's own RViz instead, add a **Path** display on `/global_path` and set its Durability Policy to **Transient Local**.
+Wait for `YOLOv5 node ready`. `rviz:=true` opens a top-down RViz view with the global path (green), the lap-1 centerline (magenta), the cone map and the camera projection.
+
+To see the path in the **simulator's RViz** instead, tick the **WaypointArrayStamped** display (it is already in the EUFS layout, just disabled). It shows the path growing during lap 1 and the closed loop afterwards. To keep that setting, use *File → Save Config As* `~/.rviz2/default.rviz`; the simulator loads that file instead of its default layout when it exists.
 
 ### 3. Arm the car
 
@@ -125,9 +128,12 @@ Parameters can be changed without rebuilding, e.g. `ros2 run eufs_autonomy pure_
 | | `max_brake` / `max_acc` | 4.0 / 2.5 | Braking / acceleration limits for the speed profile (m/s²) |
 | | `base_lookahead`, `lookahead_speed_gain` | 2.5, 0.4 | Lookahead = base + gain × speed, clamped to [`min_lookahead`, `max_lookahead`] |
 | `global_path_planner` | `min_lap_distance`, `lap_radius` | 40.0, 4.0 | Lap detection (m) |
+| | `max_offset` | 3.5 | Midpoints further than this from the driven route are ignored (m) |
+| | `max_gap` | 12.0 | Largest allowed gap when closing the loop across the start line (m) |
 | | `resample_spacing`, `smoothing_passes` | 2.0, 2 | Midpoint spacing and smoothing before the Bezier fit |
 | | `sample_spacing` | 0.25 | Spacing of points on the published path (m) |
-| both planners | `max_track_width`, `max_step`, `max_turn_deg` | 7.0, 6.0, 70 | Cone pairing and midpoint ordering limits |
+| both planners | `max_track_width` | 7.0 | Largest blue-yellow distance paired into a midpoint (m) |
+| `centerline_generator` | `max_step`, `max_gap`, `max_turn_deg` | 6.0, 12.0, 70 | Lap-1 ordering: normal step, gap-bridging step (orange start line, cones beside the car), max turn per step |
 
 ## Debugging
 
@@ -141,7 +147,8 @@ Parameters can be changed without rebuilding, e.g. `ros2 run eufs_autonomy pure_
 | `package '…' not found` while launching Gazebo | A stale/broken install of that package in another sourced workspace; delete its `build/` and `install/` folders and open a fresh terminal |
 | No `Filtered points` logs; `/velodyne_points` has no publisher | Simulated Perception is ticked (`launch_group:=no_perception`); untick it |
 | State is `AS_DRIVING` but the car doesn't move | Command mode is acceleration, or no centerline (check `Centerline: left/right` counts) |
-| `Could not close the loop` after lap 1 | Some cones were never coloured; the planner retries at the end of every lap |
+| `Could not build the loop` after lap 1 | Some cones were never coloured; the planner retries with the next lap's route |
+| Path missing in the simulator's RViz | Tick the **WaypointArrayStamped** display (topic `/trajectory`) |
 | Long pip `InvalidMarker` traceback when YOLO starts | Harmless: YOLOv5's requirement auto-update fails on Python 3.8's pip; the model still loads |
 
 ## Notes on EUFS

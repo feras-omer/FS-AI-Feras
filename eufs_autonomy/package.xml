@@ -33,8 +33,8 @@
   <depend>libpcl-all-dev</depend>
   <depend>eigen</depend>
 
-  <!-- Optional: only keep if you actually use eufs_msgs in code -->
-  <!-- <depend>eufs_msgs</depend> -->
+  <!-- EUFS interfaces (global_path_planner publishes /trajectory) -->
+  <depend>eufs_msgs</depend>
 
   <!-- Launched by pipeline.launch.py -->
   <exec_depend>yolov5_cone_detector</exec_depend>
