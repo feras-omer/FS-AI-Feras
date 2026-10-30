@@ -32,10 +32,20 @@ public:
     tf_buffer_(this->get_clock()),
     tf_listener_(tf_buffer_)
   {
+    camera_frame_ = declare_parameter(
+      "camera_frame", std::string("zed_left_camera_optical_frame"));
+    // true for real camera drivers (REP-103 optical frame: z forward, x right,
+    // y down); false for the EUFS sim, whose "optical" frames are x forward
+    optical_frame_ = declare_parameter("optical_frame", false);
+    auto image_topic = declare_parameter("image_topic", std::string("/zed/image_raw"));
+    auto info_topic = declare_parameter("camera_info_topic", std::string("/zed/camera_info"));
+    auto det_topic = declare_parameter(
+      "detections_topic", std::string("/zed/cones_detections"));
+
     auto qos = rclcpp::SensorDataQoS();
 
     cones_sub_.subscribe(this, "/lidar/cones", qos.get_rmw_qos_profile());
-    yolo_sub_.subscribe(this, "/zed/cones_detections", qos.get_rmw_qos_profile());
+    yolo_sub_.subscribe(this, det_topic, qos.get_rmw_qos_profile());
 
     sync_ = std::make_shared<Sync>(Sync(10), cones_sub_, yolo_sub_);
     sync_->registerCallback(
@@ -43,11 +53,11 @@ public:
     );
 
     image_sub_ = create_subscription<sensor_msgs::msg::Image>(
-      "/zed/image_raw", qos,
+      image_topic, qos,
       std::bind(&CameraConeVerifier::imageCb, this, std::placeholders::_1));
 
     cam_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
-      "/zed/camera_info", qos,
+      info_topic, qos,
       std::bind(&CameraConeVerifier::camInfoCb, this, std::placeholders::_1));
 
     rclcpp::QoS reliable(10);
@@ -130,7 +140,7 @@ private:
       {
         cam = tf_buffer_.transform(
           in,
-          "zed_left_camera_optical_frame",
+          camera_frame_,
           tf2::durationFromSec(0.05));
       }
       catch (...)
@@ -138,9 +148,10 @@ private:
         continue;
       }
 
-      double X = -cam.pose.position.y;
-      double Y = -cam.pose.position.z;
-      double Z =  cam.pose.position.x;
+      const auto &pc = cam.pose.position;
+      double X = optical_frame_ ? pc.x : -pc.y;
+      double Y = optical_frame_ ? pc.y : -pc.z;
+      double Z = optical_frame_ ? pc.z : pc.x;
 
       if (Z <= 0.5)
         continue;
@@ -193,7 +204,7 @@ private:
       }
     }
 
-    debug_pub_->publish(*cv_bridge::CvImage({}, "bgr8", debug).toImageMsg());
+    debug_pub_->publish(*cv_bridge::CvImage(yolo->header, "bgr8", debug).toImageMsg());
 
     if (!any)
       out = *cones;
@@ -212,6 +223,9 @@ private:
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
+
+  std::string camera_frame_;
+  bool optical_frame_;
 
   cv::Mat last_image_;
   bool cam_ready_{false};

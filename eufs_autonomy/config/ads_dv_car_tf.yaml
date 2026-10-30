@@ -1,0 +1,32 @@
+# Sensor mounting on the physical ADS-DV, published as static transforms by
+# car.launch.py. base_footprint is the point on the ground below the centre
+# of the car, as in the simulator's ADS-DV model.
+#
+# Defaults are the IMechE ADS-DV sensor positions (as used by the EUFS
+# simulator model). CHECK each one against your mounting, measured to the
+# sensor's own reference point. x forward, y left, z up (m); roll, pitch,
+# yaw (rad).
+#
+# Each child frame must be the frame_id the sensor driver puts in its
+# messages (for the camera: the root frame of the ZED wrapper's own tree).
+
+static_transforms:
+  - parent: base_footprint
+    child: velodyne                 # CHECK: velodyne driver frame_id
+    xyz: [1.400, 0.000, 0.290]
+    rpy: [0.0, 0.0, 0.0]
+
+  - parent: base_footprint
+    child: zed2_camera_link         # CHECK: ZED wrapper base frame
+    xyz: [0.334, 0.060, 0.547]
+    rpy: [0.0, 0.177, 0.0]          # pitched down 10.15 degrees
+
+  - parent: base_footprint
+    child: gps_link                 # CHECK: GPS driver frame_id
+    xyz: [0.463, 0.068, 0.477]
+    rpy: [0.0, 0.0, 0.0]
+
+  - parent: base_footprint
+    child: imu_link                 # CHECK: IMU driver frame_id
+    xyz: [0.000, 0.000, 0.253]
+    rpy: [0.0, 0.0, 0.0]

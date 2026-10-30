@@ -50,9 +50,11 @@ class YOLOv5ConeNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT
         )
 
+        image_topic = self.declare_parameter('image_topic', '/zed/image_raw').value
+
         self.sub = self.create_subscription(
             Image,
-            '/zed/image_raw',
+            image_topic,
             self.image_callback,
             qos
         )

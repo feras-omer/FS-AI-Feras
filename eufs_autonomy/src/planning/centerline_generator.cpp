@@ -9,7 +9,9 @@
 #include "eufs_autonomy/track_geometry.hpp"
 
 // Local centerline used while exploring (lap 1): midpoints of blue/yellow
-// cone pairs, ordered forward from the car.
+// cone pairs, ordered forward from the car. Recomputed at 10 Hz from the
+// latest cone map and car pose, so a perception hiccup doesn't starve the
+// controller (the map persists).
 class CenterlineGenerator : public rclcpp::Node
 {
 public:
@@ -29,15 +31,23 @@ public:
 
     cone_sub_ = create_subscription<geometry_msgs::msg::PoseArray>(
       "/map/cones", qos,
-      std::bind(&CenterlineGenerator::conesCb, this, std::placeholders::_1));
+      [this](const geometry_msgs::msg::PoseArray::SharedPtr msg) { cones_ = msg; });
 
     centerline_pub_ = create_publisher<geometry_msgs::msg::PoseArray>(
       "/map/centerline", qos);
+
+    timer_ = create_wall_timer(
+      std::chrono::milliseconds(100),
+      std::bind(&CenterlineGenerator::update, this));
   }
 
 private:
-  void conesCb(const geometry_msgs::msg::PoseArray::SharedPtr msg)
+  void update()
   {
+    if (!cones_)
+      return;
+    const auto &msg = cones_;
+
     track_geometry::Points left, right;
 
     for (const auto &p : msg->poses)
@@ -73,7 +83,8 @@ private:
       return;
 
     geometry_msgs::msg::PoseArray centerline;
-    centerline.header = msg->header;
+    centerline.header.frame_id = msg->header.frame_id;
+    centerline.header.stamp = car.header.stamp;
 
     for (const auto &m : path)
     {
@@ -90,6 +101,8 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr cone_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr centerline_pub_;
+  rclcpp::TimerBase::SharedPtr timer_;
+  geometry_msgs::msg::PoseArray::SharedPtr cones_;
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;

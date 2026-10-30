@@ -35,10 +35,13 @@
 
   <!-- EUFS interfaces (global_path_planner publishes /trajectory) -->
   <depend>eufs_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
 
   <!-- Launched by pipeline.launch.py -->
   <exec_depend>yolov5_cone_detector</exec_depend>
   <exec_depend>rviz2</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <!-- Testing -->
   <test_depend>ament_lint_auto</test_depend>

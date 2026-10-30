@@ -1,0 +1,59 @@
+# Physical ADS-DV. Start from these values and check every line marked CHECK
+# on the car (ros2 topic list, ros2 run tf2_tools view_frames). Sensor
+# positions are in ads_dv_car_tf.yaml.
+#
+# Limits are deliberately lower than in simulation for first runs; raise
+# them once the car tracks the path well.
+
+lidar_cone_detector:
+  ros__parameters:
+    pointcloud_topic: /velodyne_points      # CHECK: velodyne driver output
+    min_range: 1.8
+    max_range: 12.0
+    min_height: 0.08        # real ground isn't flat; raise if ground hits get through
+    max_height: 0.5
+    max_cluster_points: 2000
+
+yolov5_cone_node:
+  ros__parameters:
+    image_topic: /zed2/zed_node/left/image_rect_color   # CHECK: ZED wrapper output
+
+camera_cone_verifier:
+  ros__parameters:
+    image_topic: /zed2/zed_node/left/image_rect_color   # CHECK
+    camera_info_topic: /zed2/zed_node/left/camera_info  # CHECK
+    camera_frame: zed2_left_camera_optical_frame        # CHECK
+    optical_frame: true     # real drivers use REP-103 optical frames (z forward)
+
+state_estimator:
+  ros__parameters:
+    wheelbase: 1.53
+    ref_from_rear_axle: 0.765   # CHECK: base_footprint distance ahead of the rear axle
+    yaw_rate_source: imu
+    steering_delay: 0.05        # CHECK: delay from steering to the car turning (s)
+    imu_topic: /imu/data                    # CHECK: IMU driver output
+    gps_topic: /gps/fix                     # CHECK: GPS driver output
+    wheel_speeds_topic: /ros_can/wheel_speeds
+    wheel_radius: 0.2525    # CHECK: measure the loaded tyre radius
+    gps_noise: 1.0          # ~0.02 for RTK, 1-3 for a standalone receiver
+    speed_noise: 0.3
+    gyro_noise: 0.05
+    gyro_bias_noise: 0.002
+
+pure_pursuit_controller:
+  ros__parameters:
+    wheelbase: 1.53
+    max_steering: 0.42
+    explore_speed: 3.0
+    max_speed: 6.0
+    max_lat_acc: 3.5
+    max_acc: 2.0
+    max_brake: 3.0
+    max_acc_cmd: 2.5
+    max_brake_cmd: 4.0
+    finish_brake: 2.5
+    speed_kp: 1.0           # tune on the car: start low, raise until it tracks speed
+    speed_ki: 0.2
+    pose_timeout: 0.3
+    path_timeout: 1.0
+    ebs_timeout: 1.0

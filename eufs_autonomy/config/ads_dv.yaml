@@ -1,0 +1,47 @@
+# ADS-DV in the EUFS simulator (robot_name:=ads-dv).
+# Values from the simulator's ADS-DV model, which follows the IMechE
+# FS-AI ADS-DV sensor position sheet.
+
+lidar_cone_detector:
+  ros__parameters:
+    pointcloud_topic: /velodyne_points
+    min_range: 1.8          # LiDAR is in the nose; skip the car's own body
+    max_range: 12.0
+    min_height: 0.03        # above the ground, in base_footprint
+    max_height: 0.5
+
+yolov5_cone_node:
+  ros__parameters:
+    image_topic: /zed/image_raw
+
+camera_cone_verifier:
+  ros__parameters:
+    image_topic: /zed/image_raw
+    camera_info_topic: /zed/camera_info
+    camera_frame: zed_left_camera_optical_frame
+    optical_frame: false    # sim "optical" frames are x-forward
+
+state_estimator:
+  ros__parameters:
+    wheelbase: 1.53
+    ref_from_rear_axle: 0.765    # base_footprint is at the centre of mass
+    yaw_rate_source: steering   # the sim's IMU under-reads yaw rate (~61%)
+    steering_delay: 0.085       # yaw lags steering by ~85 ms in the sim
+    gyro_noise: 0.1             # noise of the steering-based yaw rate
+    imu_topic: /imu/data
+    gps_topic: /gps
+    wheel_speeds_topic: /ros_can/wheel_speeds
+    wheel_radius: 0.2525
+    gps_noise: 0.3              # sim GPS: 0.2 m per axis, plus margin
+
+pure_pursuit_controller:
+  ros__parameters:
+    wheelbase: 1.53
+    max_steering: 0.42
+    explore_speed: 4.0
+    max_speed: 8.0
+    max_lat_acc: 4.5
+    max_acc: 2.5
+    max_brake: 4.0
+    max_acc_cmd: 3.0        # vehicle limit 5.2 m/s^2
+    max_brake_cmd: 5.0

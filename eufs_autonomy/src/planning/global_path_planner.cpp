@@ -2,6 +2,7 @@
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <eufs_msgs/msg/waypoint_array_stamped.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/utils.h>
 #include <tf2_ros/buffer.h>
@@ -57,6 +58,7 @@ public:
     latched.reliable().transient_local();
     path_pub_ = create_publisher<nav_msgs::msg::Path>("/global_path", latched);
     traj_pub_ = create_publisher<eufs_msgs::msg::WaypointArrayStamped>("/trajectory", 10);
+    laps_pub_ = create_publisher<std_msgs::msg::Int32>("/laps", latched);
 
     timer_ = create_wall_timer(
       std::chrono::milliseconds(100),
@@ -78,6 +80,9 @@ private:
     }
 
     Eigen::Vector2d pos(car.transform.translation.x, car.transform.translation.y);
+    // Lap times in the pose's time base: simulation time in the sim (which
+    // may run slower than real time), real time on the car
+    rclcpp::Time stamp(car.header.stamp);
 
     // Republish once a second so RViz displays left on the default
     // (volatile) durability also pick the path up
@@ -100,7 +105,7 @@ private:
       start_ = pos;
       last_ = pos;
       route_.push_back(pos);
-      lap_start_ = now();
+      lap_start_ = stamp;
       started_ = true;
       return;
     }
@@ -117,7 +122,10 @@ private:
 
     laps_++;
     RCLCPP_INFO(get_logger(), "Lap %d complete: %.1f m in %.1f s",
-      laps_, lap_distance_, (now() - lap_start_).seconds());
+      laps_, lap_distance_, (stamp - lap_start_).seconds());
+    std_msgs::msg::Int32 laps;
+    laps.data = laps_;
+    laps_pub_->publish(laps);
 
     if (!built_)
     {
@@ -126,7 +134,7 @@ private:
         route_ = {pos};  // retry with next lap's route
     }
     lap_distance_ = 0.0;
-    lap_start_ = now();
+    lap_start_ = stamp;
   }
 
   void splitCones(Points &left, Points &right) const
@@ -322,6 +330,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr cone_sub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<eufs_msgs::msg::WaypointArrayStamped>::SharedPtr traj_pub_;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr laps_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   tf2_ros::Buffer tf_buffer_;

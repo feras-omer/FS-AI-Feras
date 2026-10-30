@@ -1,19 +1,34 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <ackermann_msgs/msg/ackermann_drive_stamped.hpp>
+#include <eufs_msgs/msg/can_state.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/int32.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2/utils.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <vector>
 
 // Pure pursuit with two modes:
 //  - explore (lap 1): follow the local /map/centerline at a capped speed
 //  - race (lap 2+):   follow the closed /global_path with a speed profile
 //                     limited by lateral acceleration and braking
+//
+// Vehicle interface (EUFS ros_can, sim or ADS-DV):
+//  - only drives in AS_DRIVING (/ros_can/state)
+//  - sends speed and an acceleration from a PI speed controller, so it works
+//    whether the car is commanded by speed or by acceleration/torque
+//  - stops after the mission's laps (track drive 10, autocross 1) and
+//    publishes /ros_can/mission_completed once stationary
+//  - brakes if the pose or path goes stale, and requests the EBS if that
+//    lasts longer than ebs_timeout
 class PurePursuitController : public rclcpp::Node
 {
 public:
@@ -35,6 +50,19 @@ public:
     min_ld_ = declare_parameter("min_lookahead", 2.0);
     max_ld_ = declare_parameter("max_lookahead", 8.0);
     speed_gain_ = declare_parameter("lookahead_speed_gain", 0.4);
+    speed_kp_ = declare_parameter("speed_kp", 1.5);
+    speed_ki_ = declare_parameter("speed_ki", 0.3);
+    max_acc_cmd_ = declare_parameter("max_acc_cmd", 3.0);
+    max_brake_cmd_ = declare_parameter("max_brake_cmd", 5.0);
+    finish_brake_ = declare_parameter("finish_brake", 3.0);
+    laps_track_drive_ = declare_parameter("laps_track_drive", 10);
+    laps_autocross_ = declare_parameter("laps_autocross", 1);
+    require_driving_state_ = declare_parameter("require_driving_state", true);
+    pose_timeout_ = declare_parameter("pose_timeout", 0.5);
+    path_timeout_ = declare_parameter("path_timeout", 1.0);
+    ebs_timeout_ = declare_parameter("ebs_timeout", 2.0);
+    ebs_on_fault_ = declare_parameter("ebs_on_fault", true);
+    auto odom_topic = declare_parameter("odom_topic", std::string("/odometry/filtered"));
 
     rclcpp::QoS qos(10);
     qos.reliable();
@@ -45,12 +73,34 @@ public:
 
     rclcpp::QoS latched(rclcpp::KeepLast(1));
     latched.reliable().transient_local();
+
+    last_pose_ = last_centerline_ = last_odom_ = now();
     global_sub_ = create_subscription<nav_msgs::msg::Path>(
       "/global_path", latched,
       std::bind(&PurePursuitController::globalPathCb, this, std::placeholders::_1));
 
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+      odom_topic, 10,
+      [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+        odom_speed_ = msg->twist.twist.linear.x;
+        last_odom_ = now();
+      });
+
+    state_sub_ = create_subscription<eufs_msgs::msg::CanState>(
+      "/ros_can/state", 10,
+      [this](const eufs_msgs::msg::CanState::SharedPtr msg) {
+        as_state_ = msg->as_state;
+        ami_state_ = msg->ami_state;
+      });
+
+    laps_sub_ = create_subscription<std_msgs::msg::Int32>(
+      "/laps", latched,
+      [this](const std_msgs::msg::Int32::SharedPtr msg) { laps_ = msg->data; });
+
     drive_pub_ = create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
       "/cmd", 10);
+    completed_pub_ = create_publisher<std_msgs::msg::Bool>("/ros_can/mission_completed", 10);
+    ebs_client_ = create_client<std_srvs::srv::Trigger>("/ros_can/ebs");
 
     timer_ = create_wall_timer(
       std::chrono::milliseconds(50),
@@ -63,6 +113,8 @@ private:
     local_path_.clear();
     for (const auto &p : msg->poses)
       local_path_.emplace_back(p.position.x, p.position.y);
+    last_centerline_ = now();
+    have_centerline_ = true;
   }
 
   void globalPathCb(const nav_msgs::msg::Path::SharedPtr msg)
@@ -128,7 +180,9 @@ private:
     }
   }
 
-  // Speed from successive car poses (the sim's odometry is not used)
+  // Speed from the state estimator, or from successive car poses when it
+  // isn't running (sim with ground-truth TF). Also tracks when the pose
+  // last changed, for the watchdog.
   void updateSpeed(const geometry_msgs::msg::TransformStamped &car)
   {
     Eigen::Vector2d pos(car.transform.translation.x, car.transform.translation.y);
@@ -144,26 +198,135 @@ private:
     last_pos_ = pos;
     last_stamp_ = stamp;
     have_last_pose_ = true;
+    last_pose_ = now();
+  }
+
+  double currentSpeed() const
+  {
+    return (now() - last_odom_).seconds() < 0.5 ? odom_speed_ : speed_;
+  }
+
+  void publishCmd(double steering, double speed, double acc)
+  {
+    ackermann_msgs::msg::AckermannDriveStamped cmd;
+    cmd.header.stamp = now();
+    cmd.drive.steering_angle = steering;
+    cmd.drive.speed = speed;
+    cmd.drive.acceleration = acc;
+    drive_pub_->publish(cmd);
+  }
+
+  // Full brake, wheels straight, speed controller reset
+  void brake()
+  {
+    speed_integral_ = 0.0;
+    publishCmd(0.0, 0.0, -max_brake_cmd_);
+  }
+
+  // PI speed controller -> acceleration command
+  double speedControl(double target, double dt)
+  {
+    double err = target - currentSpeed();
+    speed_integral_ = std::clamp(speed_integral_ + err * dt, -2.0, 2.0);
+    return std::clamp(speed_kp_ * err + speed_ki_ * speed_integral_,
+      -max_brake_cmd_, max_acc_cmd_);
+  }
+
+  // Laps to drive for the selected mission, or -1 if unsupported
+  int targetLaps() const
+  {
+    if (!require_driving_state_)
+      return laps_track_drive_;
+    switch (ami_state_)
+    {
+      case eufs_msgs::msg::CanState::AMI_TRACK_DRIVE: return laps_track_drive_;
+      case eufs_msgs::msg::CanState::AMI_AUTOCROSS: return laps_autocross_;
+      default: return -1;
+    }
+  }
+
+  // Returns true while stale inputs mean the car must not drive
+  bool watchdog(bool race_mode)
+  {
+    double pose_age = (now() - last_pose_).seconds();
+    // The path only counts as lost once one has been received (YOLO takes
+    // several seconds to start)
+    double path_age = (race_mode || !have_centerline_) ?
+      0.0 : (now() - last_centerline_).seconds();
+    bool fault = pose_age > pose_timeout_ || path_age > path_timeout_;
+
+    if (!fault)
+    {
+      fault_since_.reset();
+      return false;
+    }
+
+    if (!fault_since_)
+    {
+      fault_since_ = now();
+      RCLCPP_WARN(get_logger(), "Braking: pose %.1f s old, path %.1f s old",
+        pose_age, path_age);
+    }
+    if (ebs_on_fault_ && !ebs_requested_ &&
+        (now() - *fault_since_).seconds() > ebs_timeout_)
+    {
+      RCLCPP_ERROR(get_logger(), "Inputs lost for %.1f s, requesting EBS", ebs_timeout_);
+      if (ebs_client_->service_is_ready())
+        ebs_client_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
+      ebs_requested_ = true;
+    }
+    return true;
   }
 
   void controlLoop()
   {
+    constexpr double dt = 0.05;
+
     geometry_msgs::msg::TransformStamped car;
+    bool have_pose = true;
     try {
       car = tf_buffer_.lookupTransform("map", "base_footprint", tf2::TimePointZero);
+      updateSpeed(car);
     } catch (...) {
+      have_pose = false;
+    }
+
+    if (require_driving_state_ &&
+        as_state_ != eufs_msgs::msg::CanState::AS_DRIVING)
+    {
+      brake();
+      if (as_state_ == eufs_msgs::msg::CanState::AS_FINISHED)
+        publishCompleted();
       return;
     }
-    updateSpeed(car);
+
+    int target_laps = targetLaps();
+    if (target_laps < 0)
+    {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+        "Mission %d not supported (track drive and autocross only); holding", ami_state_);
+      brake();
+      return;
+    }
+
+    bool race_mode = !global_path_.empty();
+    if (!have_pose || watchdog(race_mode) || (!race_mode && local_path_.empty()))
+    {
+      if (have_pose && !race_mode && local_path_.empty() && !fault_since_)
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "Waiting for a centerline");
+      brake();
+      return;
+    }
 
     Eigen::Vector2d pos(car.transform.translation.x, car.transform.translation.y);
     double yaw = tf2::getYaw(car.transform.rotation);
-    double Ld = std::clamp(base_ld_ + speed_gain_ * speed_, min_ld_, max_ld_);
+    double v = currentSpeed();
+    double Ld = std::clamp(base_ld_ + speed_gain_ * v, min_ld_, max_ld_);
 
     Eigen::Vector2d target;
     double speed;
 
-    if (!global_path_.empty())
+    if (race_mode)
     {
       size_t idx = closestIndex(pos);
       target = lookaheadOnLoop(idx, Ld);
@@ -171,8 +334,6 @@ private:
     }
     else
     {
-      if (local_path_.empty())
-        return;
       target = lookaheadOnLocal(pos, Ld);
       speed = -1.0;  // set below from the pursuit curvature
     }
@@ -194,12 +355,29 @@ private:
       speed = std::max(speed, 0.3);
     }
 
-    ackermann_msgs::msg::AckermannDriveStamped cmd;
-    cmd.header.stamp = now();
-    cmd.drive.steering_angle = steering;
-    cmd.drive.speed = speed;
+    // Mission done: keep steering along the path while braking to a stop
+    if (laps_ >= target_laps)
+    {
+      if (!finishing_)
+      {
+        RCLCPP_INFO(get_logger(), "%d lap(s) done, stopping", laps_);
+        finishing_ = true;
+      }
+      speed_integral_ = 0.0;
+      publishCmd(steering, 0.0, v > 0.1 ? -finish_brake_ : -max_brake_cmd_);
+      if (v < 0.1)
+        publishCompleted();
+      return;
+    }
 
-    drive_pub_->publish(cmd);
+    publishCmd(steering, speed, speedControl(speed, dt));
+  }
+
+  void publishCompleted()
+  {
+    std_msgs::msg::Bool done;
+    done.data = true;
+    completed_pub_->publish(done);
   }
 
   // Closest point on the loop, searched near the previous one so the car
@@ -264,7 +442,12 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr centerline_sub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<eufs_msgs::msg::CanState>::SharedPtr state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr laps_sub_;
   rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr completed_pub_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr ebs_client_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   tf2_ros::Buffer tf_buffer_;
@@ -283,6 +466,18 @@ private:
   double wheelbase_, max_steering_, explore_speed_, curvature_gain_;
   double max_speed_, min_speed_, max_lat_acc_, max_acc_, max_brake_;
   double base_ld_, min_ld_, max_ld_, speed_gain_;
+  double speed_kp_, speed_ki_, max_acc_cmd_, max_brake_cmd_, finish_brake_;
+  double pose_timeout_, path_timeout_, ebs_timeout_;
+  int laps_track_drive_, laps_autocross_;
+  bool require_driving_state_, ebs_on_fault_;
+
+  double odom_speed_{0.0}, speed_integral_{0.0};
+  int as_state_{eufs_msgs::msg::CanState::AS_OFF};
+  int ami_state_{eufs_msgs::msg::CanState::AMI_NOT_SELECTED};
+  int laps_{0};
+  bool finishing_{false}, ebs_requested_{false}, have_centerline_{false};
+  rclcpp::Time last_pose_, last_centerline_, last_odom_;
+  std::optional<rclcpp::Time> fault_since_;
 };
 
 int main(int argc, char **argv)

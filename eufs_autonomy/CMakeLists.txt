@@ -31,6 +31,8 @@ find_package(message_filters REQUIRED)
 
 # EUFS interfaces (WaypointArrayStamped for the simulator's RViz)
 find_package(eufs_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 
 # Dependencies (3rd party)
@@ -68,12 +70,21 @@ ament_target_dependencies(gps_localization_node
 )
 install(TARGETS gps_localization_node DESTINATION lib/${PROJECT_NAME})
 
+# EKF state estimator (wheel speeds + IMU + GPS -> map -> base_footprint)
+add_executable(state_estimator
+  src/localization/state_estimator.cpp
+)
+ament_target_dependencies(state_estimator
+  rclcpp sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros eufs_msgs
+)
+install(TARGETS state_estimator DESTINATION lib/${PROJECT_NAME})
+
 # LiDAR cone detector node
 add_executable(lidar_cone_detector
   src/perception/lidar_cone_detector.cpp
 )
 ament_target_dependencies(lidar_cone_detector
-  rclcpp sensor_msgs geometry_msgs pcl_conversions
+  rclcpp sensor_msgs geometry_msgs pcl_conversions tf2_ros
 )
 target_link_libraries(lidar_cone_detector ${PCL_LIBRARIES})
 install(TARGETS lidar_cone_detector DESTINATION lib/${PROJECT_NAME})
@@ -111,7 +122,7 @@ add_executable(global_path_planner
   src/planning/global_path_planner.cpp
 )
 ament_target_dependencies(global_path_planner
-  rclcpp geometry_msgs nav_msgs tf2 tf2_ros eufs_msgs
+  rclcpp geometry_msgs nav_msgs tf2 tf2_ros eufs_msgs std_msgs
 )
 install(TARGETS global_path_planner DESTINATION lib/${PROJECT_NAME})
 
@@ -121,6 +132,7 @@ add_executable(pure_pursuit_controller
 )
 ament_target_dependencies(pure_pursuit_controller
   rclcpp geometry_msgs ackermann_msgs tf2 tf2_ros tf2_geometry_msgs nav_msgs
+  eufs_msgs std_msgs std_srvs
 )
 install(TARGETS pure_pursuit_controller DESTINATION lib/${PROJECT_NAME})
 
