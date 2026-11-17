@@ -17,7 +17,9 @@
 #include <vector>
 
 // Pure pursuit with two modes:
-//  - explore (lap 1): follow the local /map/centerline at a capped speed
+//  - explore (lap 1): follow the local /map/centerline, as fast as the path
+//                     seen so far allows (corners ahead, and able to stop
+//                     before the end of it), up to explore_speed
 //  - race (lap 2+):   follow the closed /global_path with a speed profile
 //                     limited by lateral acceleration and braking
 //
@@ -40,12 +42,20 @@ public:
     wheelbase_ = declare_parameter("wheelbase", 1.58);
     max_steering_ = declare_parameter("max_steering", 0.52);
     explore_speed_ = declare_parameter("explore_speed", 4.0);
-    curvature_gain_ = declare_parameter("curvature_gain", 7.0);
+    // Optional old lap-1 rule, speed = explore_speed / (1 + gain * |curvature|).
+    // 0 = off: lap 1 uses the lateral acceleration and stopping limits below.
+    curvature_gain_ = declare_parameter("curvature_gain", 0.0);
     max_speed_ = declare_parameter("max_speed", 8.0);
     min_speed_ = declare_parameter("min_speed", 1.0);
     max_lat_acc_ = declare_parameter("max_lat_acc", 5.0);
     max_acc_ = declare_parameter("max_acc", 2.5);
     max_brake_ = declare_parameter("max_brake", 4.0);
+    // Lap 1 limits (the track ahead is only known as far as the centerline reaches)
+    explore_lat_acc_ = declare_parameter("explore_lat_acc", max_lat_acc_);
+    explore_brake_ = declare_parameter("explore_brake", max_brake_);
+    explore_min_speed_ = declare_parameter("explore_min_speed", 1.0);
+    stop_margin_ = declare_parameter("explore_stop_margin", 1.5);
+    max_cut_ = declare_parameter("explore_max_cut", 0.0);
     base_ld_ = declare_parameter("base_lookahead", 2.5);
     min_ld_ = declare_parameter("min_lookahead", 2.0);
     max_ld_ = declare_parameter("max_lookahead", 8.0);
@@ -220,6 +230,7 @@ private:
   void brake()
   {
     speed_integral_ = 0.0;
+    explore_cmd_ = 0.0;
     publishCmd(0.0, 0.0, -max_brake_cmd_);
   }
 
@@ -334,7 +345,7 @@ private:
     }
     else
     {
-      target = lookaheadOnLocal(pos, Ld);
+      target = lookaheadOnLocal(pos, exploreLookahead(pos, Ld));
       speed = -1.0;  // set below from the pursuit curvature
     }
 
@@ -351,8 +362,15 @@ private:
 
     if (speed < 0.0)
     {
-      speed = explore_speed_ / (1.0 + curvature_gain_ * std::abs(curvature));
-      speed = std::max(speed, 0.3);
+      // Speed up no faster than max_acc over the distance driven (like the
+      // race-lap profile), so the car doesn't surge between two close
+      // corners. Slowing down is immediate.
+      double ds = explore_cmd_ > 0.0 ? (pos - explore_last_pos_).norm() : 0.0;
+      double ramp = std::sqrt(explore_cmd_ * explore_cmd_ + 2.0 * max_acc_ * ds);
+      explore_cmd_ = std::min(exploreSpeed(pos, curvature),
+        std::max(ramp, std::min(explore_min_speed_, explore_speed_)));
+      explore_last_pos_ = pos;
+      speed = explore_cmd_;
     }
 
     // Mission done: keep steering along the path while braking to a stop
@@ -371,6 +389,48 @@ private:
     }
 
     publishCmd(steering, speed, speedControl(speed, dt));
+  }
+
+  // Lap-1 speed: the fastest speed that
+  //  - keeps lateral acceleration under explore_lat_acc on the current
+  //    pursuit arc and at every corner of the centerline ahead (braking at
+  //    explore_brake to reach each corner's speed in time), and
+  //  - can still stop explore_stop_margin before the end of the centerline,
+  //    i.e. before the end of the track seen so far.
+  // So the car is quick when it can see far, and slows when it can't.
+  double exploreSpeed(const Eigen::Vector2d &pos, double pursuit_curvature) const
+  {
+    auto corner_speed = [this](double k) {
+      return k > 1e-6 ? std::sqrt(explore_lat_acc_ / k) : 1e9;
+    };
+
+    double v = std::min(explore_speed_, corner_speed(std::abs(pursuit_curvature)));
+    if (curvature_gain_ > 0.0)
+      v = std::min(v, explore_speed_ / (1.0 + curvature_gain_ * std::abs(pursuit_curvature)));
+
+    std::vector<Eigen::Vector2d> pts{pos};
+    pts.insert(pts.end(), local_path_.begin(), local_path_.end());
+    std::vector<double> s(pts.size(), 0.0);
+    for (size_t i = 1; i < pts.size(); ++i)
+      s[i] = s[i - 1] + (pts[i] - pts[i - 1]).norm();
+
+    // Corners ahead (curvature from three consecutive centerline points)
+    for (size_t i = 1; i + 1 < pts.size(); ++i)
+    {
+      const auto &a = pts[i - 1], &b = pts[i], &c = pts[i + 1];
+      double cross = (b - a).x() * (c - a).y() - (b - a).y() * (c - a).x();
+      double denom = (b - a).norm() * (c - b).norm() * (c - a).norm();
+      if (denom < 1e-9)
+        continue;
+      double vc = corner_speed(2.0 * std::abs(cross) / denom);
+      v = std::min(v, std::sqrt(vc * vc + 2.0 * explore_brake_ * s[i]));
+    }
+
+    // Stop before the end of the known track
+    double room = std::max(0.0, s.back() - stop_margin_);
+    v = std::min(v, std::sqrt(2.0 * explore_brake_ * room));
+
+    return std::clamp(v, std::min(explore_min_speed_, explore_speed_), explore_speed_);
   }
 
   void publishCompleted()
@@ -425,19 +485,50 @@ private:
     return global_path_[i];
   }
 
-  // The local centerline is ordered forward from the car
+  // The local centerline is ordered forward from the car. Returns the point
+  // Ld along it, interpolated between centerline points (they can be 2-3 m
+  // apart, so taking the first point past Ld aimed further ahead than Ld)
   Eigen::Vector2d lookaheadOnLocal(const Eigen::Vector2d &pos, double Ld) const
   {
     double acc = 0.0;
     Eigen::Vector2d prev = pos;
     for (const auto &p : local_path_)
     {
-      acc += (p - prev).norm();
+      double seg = (p - prev).norm();
+      if (acc + seg >= Ld && seg > 1e-9)
+        return prev + (p - prev) * ((Ld - acc) / seg);
+      acc += seg;
       prev = p;
-      if (acc >= Ld)
-        return p;
     }
     return local_path_.back();
+  }
+
+  // Lap-1 lookahead: shorter when a tight corner is coming. Pure pursuit
+  // starts turning as soon as its target point goes round a corner, so a
+  // long lookahead turns in early and cuts across the inside cones (on a
+  // 3 m wide track there is only ~0.7 m either side of the car). Entering a
+  // corner of radius R, the car cuts in by roughly Ld^2 / (8 R), so Ld is
+  // limited to sqrt(8 R explore_max_cut) for the tightest corner within
+  // the current lookahead distance. 0 = off.
+  double exploreLookahead(const Eigen::Vector2d &pos, double Ld) const
+  {
+    if (max_cut_ <= 0.0 || local_path_.size() < 3)
+      return Ld;
+
+    double k_max = 0.0;
+    double s = (local_path_[0] - pos).norm();
+    for (size_t i = 1; i + 1 < local_path_.size() && s <= Ld; ++i)
+    {
+      const auto &a = local_path_[i - 1], &b = local_path_[i], &c = local_path_[i + 1];
+      s += (b - a).norm();
+      double cross = (b - a).x() * (c - a).y() - (b - a).y() * (c - a).x();
+      double denom = (b - a).norm() * (c - b).norm() * (c - a).norm();
+      if (denom > 1e-9)
+        k_max = std::max(k_max, 2.0 * std::abs(cross) / denom);
+    }
+    if (k_max < 1e-6)
+      return Ld;
+    return std::clamp(std::sqrt(8.0 * max_cut_ / k_max), std::min(min_ld_, Ld), Ld);
   }
 
   rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr centerline_sub_;
@@ -465,13 +556,15 @@ private:
 
   double wheelbase_, max_steering_, explore_speed_, curvature_gain_;
   double max_speed_, min_speed_, max_lat_acc_, max_acc_, max_brake_;
+  double explore_lat_acc_, explore_brake_, explore_min_speed_, stop_margin_, max_cut_;
   double base_ld_, min_ld_, max_ld_, speed_gain_;
   double speed_kp_, speed_ki_, max_acc_cmd_, max_brake_cmd_, finish_brake_;
   double pose_timeout_, path_timeout_, ebs_timeout_;
   int laps_track_drive_, laps_autocross_;
   bool require_driving_state_, ebs_on_fault_;
 
-  double odom_speed_{0.0}, speed_integral_{0.0};
+  double odom_speed_{0.0}, speed_integral_{0.0}, explore_cmd_{0.0};
+  Eigen::Vector2d explore_last_pos_{0.0, 0.0};
   int as_state_{eufs_msgs::msg::CanState::AS_OFF};
   int ami_state_{eufs_msgs::msg::CanState::AMI_NOT_SELECTED};
   int laps_{0};

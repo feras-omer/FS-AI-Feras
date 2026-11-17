@@ -45,6 +45,7 @@ pure_pursuit_controller:
     wheelbase: 1.53
     max_steering: 0.42
     explore_speed: 3.0
+    curvature_gain: 7.0     # keep the old cautious lap-1 cornering on the real car until the new limits are tested
     max_speed: 6.0
     max_lat_acc: 3.5
     max_acc: 2.0

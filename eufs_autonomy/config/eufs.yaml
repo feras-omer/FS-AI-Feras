@@ -4,7 +4,7 @@ lidar_cone_detector:
   ros__parameters:
     pointcloud_topic: /velodyne_points
     min_range: 1.0
-    max_range: 12.0
+    max_range: 20.0         # was 12: YOLO sees cones ~20 m away, but only cones the LiDAR also sees get used
     min_height: 0.03        # above the ground, in base_footprint
     max_height: 0.5
 
@@ -36,7 +36,10 @@ pure_pursuit_controller:
   ros__parameters:
     wheelbase: 1.58
     max_steering: 0.52
-    explore_speed: 4.0
+    explore_speed: 6.0      # lap-1 top speed; the car also slows for corners ahead and for a short visible path
+    explore_lat_acc: 3.5    # lap-1 cornering limit, below max_lat_acc: the track ahead isn't known yet
+    explore_max_cut: 0.15   # lap-1 lookahead shrinks in tight corners so the car doesn't cut the inside cones
+    explore_brake: 2.5      # lap-1 braking to plan with; the PI speed loop only brakes ~2.5 m/s^2 in acceleration mode
     max_speed: 8.0
     max_lat_acc: 5.0
     max_acc_cmd: 3.0

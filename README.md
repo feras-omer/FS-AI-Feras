@@ -26,7 +26,7 @@ EUFS sim or ADS-DV
 
 Cone colour is carried in `pose.orientation.z` (`1` = blue = left, `2` = yellow = right).
 
-**Lap 1 (explore):** the car follows a local centerline (blue/yellow midpoints ordered forward from the car) at up to `explore_speed`, while the mapper builds a persistent cone map. Cones seen 3+ times are kept for the whole run; colour is a majority vote.
+**Lap 1 (explore):** the car follows a local centerline (blue/yellow midpoints ordered forward from the car) at up to `explore_speed`, while the mapper builds a persistent cone map. The speed is the fastest that keeps the corners on the centerline ahead under `explore_lat_acc` and still lets the car stop before the end of the centerline it can see, so it's quick when it can see a long way and slows when it can't. Before tight corners the lookahead shrinks (`explore_max_cut`) so the car doesn't cut across the inside cones. Lap 1 is timed from when the car first moves. Cones seen 3+ times are kept for the whole run; colour is a majority vote.
 
 **End of lap 1:** when the car is back within 4 m of its start after driving 40+ m, `global_path_planner` pairs every blue/yellow cone in the map and orders the midpoints by where they lie along the route the car actually drove that lap (so the loop can't skip a section or dead-end where cones are missing). It then smooths them and fits piecewise cubic Bezier curves (Catmull-Rom control points, so segments join smoothly). The result is published on `/global_path` (`nav_msgs/Path`, transient local, republished every second) and, for the simulator's RViz, on `/trajectory`. During lap 1, `/trajectory` shows the path forming along the route driven so far.
 
@@ -42,6 +42,16 @@ Results on `small_track` (simulation). The ADS-DV lap times are wall-clock times
 | ADS-DV | ground truth | 76 s | 23.1–23.7 s | 10 laps, stopped, `AS_FINISHED`, no hits |
 | ADS-DV | EKF (GPS + wheel speeds + steering) | 77.5 s | 21.8–22.5 s | 10 laps, stopped, `AS_FINISHED`, no hits; estimator error 0.28 m mean, < 1 m worst |
 | ADS-DV | EKF, autocross | 73.7 s | n/a | 1 lap, stopped, `AS_FINISHED` |
+
+Lap 1 speed-up (ground truth localisation, simulation time, lap 1 timed from when the car first moves; "before" is the same setup with the previous code):
+
+| Car | Track | Command mode | Lap 1 before | Lap 1 now | Notes |
+|---|---|---|---|---|---|
+| EUFS | small_track | velocity | 36.7 s | 20.5 s | 10-lap track drive: race laps 14.1 s as before, no hits |
+| EUFS | peanut | velocity | 46.4 s | 22.8 s | no hits |
+| ADS-DV | small_track | velocity | 36.0 s | 22.0 s | |
+| ADS-DV | small_track | acceleration | 36.8 s | 22.3 s | 10-lap track drive: race laps 15.1–15.3 s, no hits |
+| ADS-DV | peanut | acceleration | 46.6 s | 24.0 s | no hits |
 
 | Package | Language | Contents |
 |---|---|---|
@@ -191,6 +201,11 @@ Parameters can be changed without rebuilding, e.g. `ros2 run eufs_autonomy pure_
 | | `steering_delay` | 0.0 | Delay from steering to the car turning (s); 0.085 in the sim |
 | | `ref_from_rear_axle` | 0.765 | Distance of `base_footprint` ahead of the rear axle (m) |
 | `pure_pursuit_controller` | `explore_speed` | 4.0 | Lap 1 speed cap (m/s) |
+| | `explore_lat_acc` | `max_lat_acc` | Lap 1 cornering limit (m/s²), applied to the corners on the centerline ahead |
+| | `explore_brake`, `explore_stop_margin` | `max_brake`, 1.5 | Lap 1: braking used to plan for corners ahead, and the car can always stop this far (m) before the end of the centerline it can see |
+| | `explore_min_speed` | 1.0 | Lap 1 speed floor (m/s) |
+| | `explore_max_cut` | 0 (off) | Lap 1: lookahead shrinks before tight corners so the car cuts in by at most about this much (m) |
+| | `curvature_gain` | 0 (off) | Old lap 1 rule `explore_speed / (1 + gain × curvature)`, used on top of the limits above if > 0 (`ads_dv_car` keeps 7) |
 | | `max_speed` | 8.0 | Race speed cap (m/s) |
 | | `max_lat_acc` | 5.0 | Cornering limit for the speed profile (m/s²) |
 | | `max_brake` / `max_acc` | 4.0 / 2.5 | Braking / acceleration limits for the speed profile (m/s²) |

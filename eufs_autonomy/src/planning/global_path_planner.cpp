@@ -110,6 +110,17 @@ private:
       return;
     }
 
+    // Lap 1 is timed from when the car first moves, not from when this node
+    // started: the car waits at the start for YOLO to load and the mission to
+    // be armed, which used to add 10-20 s to the logged lap 1 time
+    if (!moving_)
+    {
+      if ((pos - start_).norm() < 0.05)
+        return;
+      moving_ = true;
+      lap_start_ = stamp;
+    }
+
     lap_distance_ += (pos - last_).norm();
     last_ = pos;
 
@@ -343,6 +354,7 @@ private:
   int ticks_since_preview_{0};
 
   bool started_{false};
+  bool moving_{false};
   bool built_{false};
   int laps_{0};
   Eigen::Vector2d start_, last_;

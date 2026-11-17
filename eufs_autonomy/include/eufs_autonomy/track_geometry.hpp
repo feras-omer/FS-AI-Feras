@@ -75,10 +75,18 @@ inline Points pairMidpoints(
 // first step from the car (cones beside it are outside the camera view and
 // never coloured). Stops when nothing qualifies or the walked length exceeds
 // max_length.
+//
+// Points the car is already level with or past (less than min_ahead in front
+// of it, and within near_radius) are skipped. Otherwise, at a corner, a
+// midpoint 0.2 m to the side of the car became the first step and set the
+// walking direction sideways, so every point further round the corner failed
+// the max_turn test and the path ended at the car. For the same reason a
+// short step (< min_dir_step) doesn't change the walking direction.
 inline Points orderPath(
   const Points &points, const Eigen::Vector2d &start, double heading,
   double max_step, double max_turn, double max_gap,
-  double max_length = 1e9)
+  double max_length = 1e9, double min_ahead = 1.0, double near_radius = 2.5,
+  double min_dir_step = 1.0)
 {
   Points path;
   std::vector<bool> used(points.size(), false);
@@ -86,6 +94,13 @@ inline Points orderPath(
   Eigen::Vector2d cur = start;
   Eigen::Vector2d dir(std::cos(heading), std::sin(heading));
   double length = 0.0;
+
+  for (size_t i = 0; i < points.size(); ++i)
+  {
+    Eigen::Vector2d d = points[i] - start;
+    if (d.norm() < near_radius && d.dot(dir) < min_ahead)
+      used[i] = true;
+  }
 
   auto best_within = [&](double limit)
   {
@@ -124,7 +139,8 @@ inline Points orderPath(
     used[best] = true;
     Eigen::Vector2d step = points[best] - cur;
     length += step.norm();
-    dir = step.normalized();
+    if (step.norm() >= min_dir_step)
+      dir = step.normalized();
     cur = points[best];
     path.push_back(cur);
   }
